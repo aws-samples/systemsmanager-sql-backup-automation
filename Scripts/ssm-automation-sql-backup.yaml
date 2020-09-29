@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  SSM Automation for backing up SQL Server databases to S3
+
+Parameters:
+  BackupBucketName:
+    Description: Name of the bucket to create where the backup content is stored
+    Type: String
+  
+  ScriptBucketName:
+    Description: Name of the bucket to create where the backup scripts are stored
+    Type: String
+  
+  Environment:
+    Description: Environment
+    Type: String
+
+
+Resources:
+  SsmRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+
+
+  # SsmStateManagerAssociation:
+  #   Type: AWS::SSM::Association
+  #   Properties:
+  #     AssociationName: Contact-SQL-Backup
+  #     Name: !Ref SqlBackUpAutomationDocument
+  #     #DocumentVersion: 1(LATEST)
+  #     Parameters:
+  #       TargetTagName:
+  #         - SsmTarget
+  #       TargetTagValue:
+  #         - SQLServerBackup
+  #     ScheduleExpression: cron(05 22 * * SAT *)
+  
+  SqlBackUpAutomationDocument:
+    Type: 'AWS::SSM::Document'
+    Properties:
+      DocumentType: Automation
+      # Name: Contact-SQL-Backup
+      Content:
+        schemaVersion: '0.3'
+        assumeRole: !GetAtt SsmRole.Arn
+        parameters:
+          TargetTagName:
+            type: String
+            description: TargetTagName
+          TargetTagValue:
+            type: String
+            description: TargetTagValue
+        mainSteps:
+          - name: GetInstances
+            action: 'aws:executeAwsApi'
+            outputs:
+              - Name: InstanceIds
+                Selector: $.Reservations..Instances..InstanceId
+                Type: StringList
+            inputs:
+              Service: ec2
+              Api: DescribeInstances
+              Filters:
+                - Name: 'tag:{{TargetTagName}}'
+                  Values:
+                    - '{{TargetTagValue}}'
+                - Name: instance-state-name
+                  Values:
+                    - running
+            description: Get instances
+          - name: AttachVolumes
+            action: 'aws:executeScript'
+            inputs:
+              Runtime: PowerShell Core 6.0
+              Script: "Write-Host 'Creating and attaching volumes...';\r\n$inputPayload = $env:InputPayload | ConvertFrom-Json;\r\n<#$parameter = $inputPayload.events.parameter;#>\r\nInstall-Module AWS.Tools.EC2 -Force\r\nImport-Module AWS.Tools.EC2\r\n\r\n$instanceVolumes = @{}\r\n$instanceIds = $inputPayload.parameter\r\nWrite-Host $instanceIds.Count\r\n\r\n#Creating EBS volumes for each EC2 instance\r\nforeach ($instanceId in $instanceIds)\r\n{\r\n  #Getting EC2 instance\r\n  $instance = (Get-EC2Instance -InstanceId $instanceId).Instances[0]\r\n  Write-Host $instanceId\r\n  \r\n  #Ascertaining backup volume size\r\n  $backupVolSize = 3000\r\n  foreach ($tag in $instance.Tags)\r\n  {\r\n    if ($tag.Key -eq \"AutomationBackupVolSize\")\r\n    {\r\n      $backupVolSize = $tag.value\r\n    }\r\n  }\r\n  \r\n  #Crating tag for volumes\r\n  $tag = New-Object Amazon.EC2.Model.Tag\r\n  $tag.Key = \"InstanceId\"\r\n  $tag.Value = \"backup: ${instanceId}\"\r\n  \r\n  #Checking if volume already exists\r\n  $volExists = $false\r\n  foreach ($bd in $instance.BlockDeviceMappings)\r\n  {\r\n    if ($bd.DeviceName -ne \"/dev/sda1\")\r\n    {\r\n      $vol = Get-EC2Volume -VolumeId $bd.Ebs.VolumeId\r\n      foreach ($vtag in $vol.Tags.Key)\r\n      {\r\n        if ($tag.Key -eq $vtag.Key -and $tag.Value -eq $vtag.Value)\r\n        {\r\n          $volExists = $true\r\n          Write-Host \"Sipping volume for instance \"$instanceId\r\n          break;\r\n        }\r\n      }\r\n      if ($volExists)\r\n      {\r\n        break;\r\n      }\r\n    }\r\n  }\r\n  if ($volExists)\r\n  {\r\n    continue;\r\n  }\r\n  \r\n  Write-Host \"Creating new volume...\"\r\n  $AZ = $instance.Placement.AvailabilityZone\r\n  $vol = New-EC2Volume -AvailabilityZone $AZ -Size $backupVolSize -VolumeType ([Amazon.EC2.VolumeType]::Gp2)\r\n  \r\n  \r\n  New-EC2Tag -Resource $vol.VolumeId -Tag $tag\r\n  \r\n  if ($instanceVolumes.Contains($instanceId))\r\n  {\r\n    $dummy = Remove-EC2Volume -VolumeId $vol.VolumeId\r\n  }\r\n  else\r\n  {\r\n    $instanceVolumes.Add($instanceId, $vol)\r\n  }\r\n}\r\n\r\n#Attaching EBS volumes to associated EC2 instances\r\n$volIds = New-Object System.Text.StringBuilder\r\nforeach ($instanceId in $instanceVolumes.Keys)\r\n{\r\n  $volId = $instanceVolumes[$instanceId].VolumeId\r\n  $vol = Get-EC2Volume -VolumeId $volId\r\n  while ($vol.State -ne \"available\" -and $vol.State -ne \"in-use\")\r\n  {\r\n    Write-Host $vol.State $vol.VolumeId\r\n    $vol = Get-EC2Volume -VolumeId $vol.VolumeId\r\n    Start-Sleep 5\r\n  }\r\n  $dummy = Add-EC2Volume -VolumeId $vol.VolumeId -InstanceId $instanceId -Device xvdz\r\n  $dummy = $volIds.Append($vol.VolumeId.Remove(3, 1))\r\n}\r\n\r\n\r\n$output = @{message=$volIds.ToString()}\r\nreturn $output"
+              InputPayload:
+                parameter: '{{GetInstances.InstanceIds}}'
+            outputs:
+              - Name: VolIds
+                Selector: $.Payload.message
+                Type: String
+          - name: InitializeDisk
+            action: 'aws:runCommand'
+            onFailure: step:DetachVolumes
+            inputs:
+              Parameters:
+                sourceType: S3
+                sourceInfo: !Sub | 
+                  {"path":
+                  "https://${ScriptBucketName}-${Environment}.s3-ap-southeast-2.amazonaws.com/InitializeDisk.ps1"}
+                commandLine: './InitializeDisk.ps1 -volIds {{AttachVolumes.VolIds}}'
+              DocumentName: AWS-RunRemoteScript
+              InstanceIds: '{{GetInstances.InstanceIds}}'
+          - name: RunBackupJob
+            action: 'aws:runCommand'
+            timeoutSeconds: 28800
+            onFailure: step:TakeVolumesOffline
+            inputs:
+              Parameters:
+                sourceType: S3
+                executionTimeout: "28800"
+                sourceInfo: !Sub | 
+                  {"path":
+                  "https://${ScriptBucketName}-${Environment}.s3-ap-southeast-2.amazonaws.com/BackupJob.ps1"}
+                commandLine: './BackupJob.ps1'
+              DocumentName: AWS-RunRemoteScript
+              InstanceIds: '{{GetInstances.InstanceIds}}'
+          - name: RunS3Copy
+            action: 'aws:runCommand'
+            timeoutSeconds: 28800
+            onFailure: step:TakeVolumesOffline
+            inputs:
+              Parameters:
+                sourceType: S3
+                executionTimeout: "28800"
+                sourceInfo: !Sub | 
+                  {"path":
+                  "https://${ScriptBucketName}-${Environment}.s3-ap-southeast-2.amazonaws.com/S3Copy.ps1"}
+                commandLine: './S3Copy.ps1'
+              DocumentName: AWS-RunRemoteScript
+              InstanceIds: '{{GetInstances.InstanceIds}}'
+          - name: TakeVolumesOffline
+            action: 'aws:runCommand'
+            inputs:
+              Parameters:
+                sourceType: S3
+                sourceInfo: !Sub | 
+                  {"path":
+                  "https://${ScriptBucketName}-${Environment}.s3-ap-southeast-2.amazonaws.com/UnmountDisk.ps1"}
+                commandLine: './UnmountDisk.ps1 -volIds {{AttachVolumes.VolIds}}'
+              DocumentName: AWS-RunRemoteScript
+              InstanceIds: '{{GetInstances.InstanceIds}}'
+          - name: DetachVolumes
+            action: 'aws:executeScript'
+            inputs:
+              Runtime: PowerShell Core 6.0
+              Script: "Write-Host 'Detaching and deleting volumes...';\r\n#$instanceVolumes = $env:InputPayload | ConvertFrom-Json;\r\n<#$parameter = $inputPayload.events.parameter;#>\r\nInstall-Module AWS.Tools.EC2 -Force\r\nImport-Module AWS.Tools.EC2\r\n\r\n$vols = Get-EC2Volume -Filter @{ Name=\"tag-key\"; Values=\"InstanceId\" }\r\nforeach ($vol in $vols)\r\n{\r\n  if ($vol.State -ne \"available\")\r\n  {\r\n    Dismount-EC2Volume -VolumeId $vol.VolumeId #-ForceDismount $true\r\n  }\r\n}\r\n\r\n$deletedCount = 0\r\n$volsCount = $vols.Count\r\nwhile ($deletedCount -lt $vols.Count)\r\n{\r\n  $vols = Get-EC2Volume -Filter @{ Name=\"tag-key\"; Values=\"InstanceId\" }\r\n  foreach ($vol in $vols)\r\n  {\r\n    if ($vol.State -eq \"available\")\r\n    {\r\n      Remove-EC2Volume -VolumeId $vol.VolumeId -Force\r\n      $deletedCount++\r\n    }\r\n    else\r\n    {\r\n      Write-Host $vol.State $vol.VolumeId\r\n    }\r\n  }\r\n  Start-Sleep 5\r\n}\r\n\r\nWrite-Host 'Deleted all volumes'\r\nreturn @{message='Deleted volumes'}"
+              InputPayload:
+                parameter: '{{AttachVolumes.VolIds}}'
+  
+  S3BucketBackups:
+     Type: AWS::S3::Bucket
+     Properties: 
+       AccessControl: Private
+       BucketName: !Sub ${BackupBucketName}-${Environment}
+       BucketEncryption:
+         ServerSideEncryptionConfiguration:
+           - ServerSideEncryptionByDefault:
+               SSEAlgorithm: AES256
+       PublicAccessBlockConfiguration: 
+         BlockPublicAcls: true
+         BlockPublicPolicy: true
+         IgnorePublicAcls: true
+         RestrictPublicBuckets: true
+       VersioningConfiguration:
+         Status: Enabled
+  
+  S3BucketScripts:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private
+      BucketName: !Sub ${ScriptBucketName}-${Environment}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration: 
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
