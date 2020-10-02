@@ -1,11 +1,11 @@
-## My Project
+## Blog: Automated just-in-time storage for MSSQL backup
 
-TODO: Fill this README out!
+This respository is part of the AWS blog to Automated just-in-time storage for MSSQL backup. These usage of these scripts are described in the blog <URL to be added>. 
 
-Be sure to:
+Blog Objective: 
+Automated attachement of EBS volume to EC2 running SQL Server just before taking SQL backup. The solution helps customer save cost by provisioning storage just-in-time for SQL backup job and delete it after the job is completed. The scripts are designed to work with AWS Systems Manager Automation to achieve the outcome. 
 
-* Change the title in this README
-* Edit your repository description on GitHub
+Please refer the blog for detailed description.
 
 ## Security
 
