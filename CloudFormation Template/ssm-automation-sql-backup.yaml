@@ -13,7 +13,7 @@ Parameters:
   
   Environment:
     Description: Environment
-    Type: String
+    Type: String   
 
 
 Resources:
@@ -155,7 +155,7 @@ Resources:
      Type: AWS::S3::Bucket
      Properties: 
        AccessControl: Private
-       BucketName: !Sub ${BackupBucketName}-${Environment}
+       BucketName: !Sub ${BackupBucketName}-${Environment}-${AWS::AccountId}
        BucketEncryption:
          ServerSideEncryptionConfiguration:
            - ServerSideEncryptionByDefault:
@@ -172,7 +172,7 @@ Resources:
     Type: AWS::S3::Bucket
     Properties: 
       AccessControl: Private
-      BucketName: !Sub ${ScriptBucketName}-${Environment}
+      BucketName: !Sub ${ScriptBucketName}-${Environment}-${AWS::AccountId}
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
