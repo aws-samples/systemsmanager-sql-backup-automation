@@ -38,7 +38,7 @@ Resources:
   # SsmStateManagerAssociation:
   #   Type: AWS::SSM::Association
   #   Properties:
-  #     AssociationName: Contact-SQL-Backup
+  #     AssociationName: SQL-Backup-Association
   #     Name: !Ref SqlBackUpAutomationDocument
   #     #DocumentVersion: 1(LATEST)
   #     Parameters:
@@ -52,7 +52,6 @@ Resources:
     Type: 'AWS::SSM::Document'
     Properties:
       DocumentType: Automation
-      # Name: Contact-SQL-Backup
       Content:
         schemaVersion: '0.3'
         assumeRole: !GetAtt SsmRole.Arn
